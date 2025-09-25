@@ -292,3 +292,17 @@ def checksum(array: FieldArrayLike) -> int:
     else:
         return zlib.crc32(as_numpy_array(array).tobytes())
     # raise ValueError("Array does not support CUDA Array Interface or Array Interface!")
+
+
+def get_scalar_array(array: FieldArrayLike) -> np.ndarray:
+    """Return a 1 component array. For multipe components arrays, this returns its magnitude."""
+    if array.ndim == 1:
+        return as_numpy_array(array)
+    elif array.ndim == 2 and array.shape[1] == 1:
+        return as_numpy_array(array).ravel()
+    elif array.ndim == 2 and array.shape[1] > 1:
+        # compute magnitudes
+        arr = as_numpy_array(array)
+        return np.linalg.norm(arr, axis=1)
+    else:
+        raise ValueError(f"Cannot convert array of shape {array.shape} to scalar array!")

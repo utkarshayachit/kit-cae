@@ -55,7 +55,7 @@ async def set_shader_domain(
     if inp.Get() == None or inp.Get() == (0, -1):
         if domain is None:
             arrayPrim = usd_utils.get_target_prim(datasetPrim, f"field:{fieldName}")
-            domain = await usd_utils.get_array_range(arrayPrim, timeCode, quiet=True)
+            domain = await usd_utils.get_array_range(arrayPrim, timeCode, mode="mag", quiet=True)
 
         if domain:
             logger.info("setting domain to %s on %s (overriding %s)", domain, shader, inp.Get())
@@ -180,12 +180,12 @@ class Points(Algorithm):
         widths_pvar = pvAPI.GetPrimvar("widths")
 
         if colors_field and colors_field in result.fields:
-            colors = array_utils.as_numpy_array(result.fields[colors_field])
+            colors = array_utils.get_scalar_array(result.fields[colors_field])
             colors = colors[::stride] if stride > 1 else colors
-            assert colors.shape[0] == points.shape[0]
+            assert colors.shape[0] == points.shape[0], f"{colors.shape} vs {points.shape}"
             scalar_pvar.Set(VtRt.FloatArray(colors.reshape(-1, 1)))
         else:
-            # deactivate scalar coloring.
+            # deactivate scalar coloring
             scalar_pvar.Set(VtRt.FloatArray(np.full(points.shape[0], 0.0, dtype=np.float32).reshape(-1, 1)))
             # colors = np.full(points.shape[0], 0.0, dtype=np.float32)
 
@@ -199,7 +199,7 @@ class Points(Algorithm):
             logger.warning("No material found for ScalarColor")
 
         if widths_field and widths_field in result.fields:
-            widths = array_utils.as_numpy_array(result.fields[widths_field])
+            widths = array_utils.get_scalar_array(result.fields[widths_field])
             widths = widths[::stride] if stride > 1 else widths
             assert widths.shape[0] == points.shape[0]
 
@@ -281,7 +281,7 @@ class Glyphs(Algorithm):
             quaternions = None
 
         if color_field:
-            scalars: np.ndarray = array_utils.as_numpy_array(result.fields[color_field])
+            scalars: np.ndarray = array_utils.get_scalar_array(result.fields[color_field])
             if stride > 1:
                 scalars = scalars[::stride]
             assert scalars.shape[0] == points.shape[0]
@@ -346,7 +346,7 @@ class ExternalFaces(Algorithm):
             meshT.CreateNormalsAttr().Set(VtRt.Vec3fArray(mesh.normals))
 
         if colors_field and colors_field in mesh.fields:
-            scalar = mesh.fields[colors_field]
+            scalar = array_utils.get_scalar_array(mesh.fields[colors_field])
             nb_scalars = scalar.shape[0]
             if nb_scalars == mesh.points.shape[0]:
                 # "vertex": Values are interpolated between each vertex in the surface primitive. The basis function
@@ -472,7 +472,7 @@ class Streamlines(Algorithm):
 
         streamlines = streamlines.numpy()
 
-        scalars = streamlines.fields.get("scalar")
+        scalars = array_utils.get_scalar_array(streamlines.fields.get("scalar"))
         time = streamlines.fields.get("time")
         rnd = np.random.default_rng(1986).random(streamlines.curveVertexCounts.shape[0], dtype=np.float32)
 

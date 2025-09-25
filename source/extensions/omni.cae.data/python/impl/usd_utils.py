@@ -324,9 +324,17 @@ def get_bounds(prim: Usd.Prim, timeCode=Usd.TimeCode.Default()) -> Gf.Range3d:
 
 @async_quietable
 @progress.progress_context("Computing range")
-async def get_array_range(prim: Usd.Prim, timeCode: Usd.TimeCode = Usd.TimeCode.Default()) -> tuple[any, any]:
-    """Returns the range for the field array prim as tuple (min, max). For multi-component arrays, `min` and `max`
-    themselves are tuples.
+async def get_array_range(
+    prim: Usd.Prim, timeCode: Usd.TimeCode = Usd.TimeCode.Default(), *, mode: Union[int, str] = "comp"
+) -> tuple[any, any]:
+    """
+    Returns the range for the field array prim as tuple (min, max).
+    For multi-component arrays, `mode` determines how the range is computed.
+
+    If `mode` is a number, it is treated as the component index to compute the range for.
+    If `mode` is "mag", the range is computed as the min/max of the magnitudes of the components.
+    If `mode` is "comp" (default), the range is computed as the min/max of the each of the components. The returned
+    `min` and `max` are tuples of length equal to the number of components in the array.
     """
     if not prim or not prim.IsValid():
         raise QuietableException("Invalid prim %s" % prim)
@@ -335,23 +343,27 @@ async def get_array_range(prim: Usd.Prim, timeCode: Usd.TimeCode = Usd.TimeCode.
         "timeCode": str(timeCode.GetValue()),
     }
 
-    cache_key = {"label": "usd_utils.get_range", "fieldArray": prim.GetPath()}
+    cache_key = {"label": "usd_utils.get_range", "fieldArray": prim.GetPath(), "mode": mode}
 
     range = cache.get(str(cache_key), cache_state)
     if range is None:
         array = array_utils.as_numpy_array(await get_array(prim, timeCode))
-        if np.issubdtype(array.dtype, np.floating):
-            mask = np.isfinite(array)
-            range = (
-                np.amin(array, axis=0, where=mask, initial=np.inf).tolist(),
-                np.amax(array, axis=0, where=mask, initial=-np.inf).tolist(),
-            )
-        else:
-            range = (np.amin(array, axis=0).tolist(), np.amax(array, axis=0).tolist())
+        if type(mode) is int:
+            if array.ndim != 2 or mode < 0 or mode >= array.shape[1]:
+                raise QuietableException(f"Invalid component index {mode} for array with shape {array.shape}")
+            array = array[:, mode]
+        elif type(mode) is str:
+            assert mode in ("comp", "mag"), f"Invalid mode {mode}, expected 'comp' or 'mag'"
+            if mode == "mag":
+                if array.ndim == 2 and array.shape[1] > 1:
+                    array = np.linalg.norm(array, axis=1)
+                elif array.ndim > 2:
+                    raise QuietableException(f"Cannot compute magnitude for array with shape {array.shape}")
 
+        finite_array = array[np.isfinite(array)]
+        range = finite_array.min().tolist(), finite_array.max().tolist()
         if range[0] > range[1]:
             raise QuietableException("Invalid range, is data valid?")
-
         cache.put(str(cache_key), range, cache_state, sourcePrims=[prim])
     return range
 
@@ -369,7 +381,7 @@ async def apply_dataset_colormap_range(
             if attr := colormap_prim.GetAttribute(colormap_attribute_name):
                 range = kwargs.get("range", None)
                 if range is None:
-                    range = await get_array_range(field_prim, timeCode)
+                    range = await get_array_range(field_prim, timeCode, mode="mag")
                     logger.info(f"Setting {colormap_prim} range to {range[0]}:{range[1]} from {field_prim}")
                 else:
                     logger.info(f"Setting {colormap_prim} range to {range[0]}:{range[1]}")
