@@ -2,6 +2,10 @@
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.2.0]
+
+- Added schema for custom glyphs.
+
 ## [1.1.0]
 
 - Added `CaeAlgorithmsPrimvarsAPI` to add to algorithms to pass additional fields as primvars.

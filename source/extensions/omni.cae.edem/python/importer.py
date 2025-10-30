@@ -1,0 +1,232 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+#
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+#  its affiliates is strictly prohibited.
+
+import os.path
+from logging import getLogger
+from pathlib import Path
+
+import h5py as h5
+import omni.client.utils as clientutils
+from omni.cae.data import progress
+from omni.cae.schema import cae
+from omni.client import get_local_file_async
+from omni.kit.tool.asset_importer import AbstractImporterDelegate
+from pxr import Sdf, Tf, Usd, UsdGeom, UsdUtils, Vt
+
+logger = getLogger(__name__)
+
+
+class EDEMImporter(AbstractImporterDelegate):
+
+    @property
+    def name(self):
+        return "EDEM Importer"
+
+    @property
+    def filter_regexes(self) -> list[str]:
+        return [r".*\.dem$"]
+
+    @property
+    def filter_descriptions(self) -> list[str]:
+        return ["EDEM Deck (*.dem)"]
+
+    def show_destination_frame(self):
+        return True
+
+    def supports_usd_stage_cache(self):
+        return True
+
+    def build_options(self, paths: list[str]) -> None:
+        pass
+
+    async def convert_assets(self, paths: list[str], **kwargs):
+        result = {}
+        for path in paths:
+            normalized_path = clientutils.normalize_url(path)
+            if converted_path := await self._convert_asset(
+                normalized_path, kwargs.get("import_as_reference"), kwargs.get("export_folder")
+            ):
+                result[path] = converted_path
+        return result
+
+    async def _convert_asset(self, path: str, import_as_reference: bool, export_folder: str):
+        with progress.ProgressContext(f"Downloading EDEM file {os.path.basename(path)}"):
+            _, local_path = await get_local_file_async(path)
+
+        with progress.ProgressContext(f"Importing EDEM file {os.path.basename(path)}"):
+
+            if import_as_reference:
+                # when importing as reference, create a new stage file and then return that.
+                output_dir = export_folder if export_folder else os.path.dirname(path)
+                name, _ = os.path.splitext(os.path.basename(path))
+                usd_path = os.path.join(output_dir, f"{name}.usda")
+                # TODO: if file exists, warn!!!
+
+                stage = Usd.Stage.CreateNew(usd_path)
+                await populate_stage(path, local_path, stage)
+                stage.Save()
+                return usd_path
+            else:
+                # when adding directly to stage, just create an in memory stage
+                # and return its id
+                stage = Usd.Stage.CreateInMemory()
+                await populate_stage(path, local_path, stage)
+                stage_id = UsdUtils.StageCache.Get().Insert(stage)
+                return stage_id.ToString()
+
+
+async def populate_stage(uri: str, local_path: str, stage: Usd.Stage):
+    # Implementation of the function
+    world = UsdGeom.Xform.Define(stage, "/World")
+    stage.SetDefaultPrim(world.GetPrim())
+    UsdGeom.SetStageUpAxis(stage, "Z")
+    root = UsdGeom.Scope.Define(stage, world.GetPath().AppendChild(Tf.MakeValidIdentifier(os.path.basename(uri))))
+    rootPath = root.GetPath()
+
+    with h5.File(local_path, "r") as deck:
+        nb_timesteps = deck.attrs.get("num timesteps", 0)
+        if nb_timesteps < 1:
+            logger.warning(f"No timesteps found in {uri}")
+            return
+
+        # read particle types; only reads from the 1st timestep.
+        particle_types = await read_particle_types(uri, stage, rootPath)
+
+        # now read the particles as a PointCloud.
+        configs = []
+        for t in range(nb_timesteps):
+            p_uri = Path(uri)
+            h_uri = str(p_uri.parent / f"{p_uri.stem}_data" / f"{t}.h5")
+            with progress.ProgressContext(f"Loading timestep {t}"):
+                _, h_path = await get_local_file_async(h_uri)
+
+            with h5.File(h_path, "r") as h:
+                if "TimestepData" not in h:
+                    continue
+                for _, node in h["TimestepData"].items():
+                    data_time = node.attrs.get("time", 0.0)
+                    configs.append(
+                        {
+                            "time": data_time,
+                            "path": h_uri,
+                            "h5_path_prefix": node.name,
+                        }
+                    )
+
+        if len(configs) != nb_timesteps:
+            logger.error(f"Expected {nb_timesteps} timesteps, but found {len(configs)} in {uri}!")
+            raise RuntimeError(f"Expected {nb_timesteps} timesteps, but found {len(configs)} in {uri}!")
+
+        await read_particle_datasets(uri, stage, rootPath, particle_types, configs)
+
+
+async def read_particle_datasets(
+    uri: str, stage: Usd.Stage, rootPath: Sdf.Path, particle_types: list[str], configs: list[dict]
+):
+    for p_type in particle_types:
+        # Not entirely sure how to name the dataset, the name of the particle type is not a good choice, but
+        # we'll go with that for now.
+        dataset = cae.DataSet.Define(stage, rootPath.AppendChild(Tf.MakeValidIdentifier(p_type["name"])))
+        cae.PointCloudAPI.Apply(dataset.GetPrim())
+        cls = cae.FieldArray(stage.CreateClassPrim(dataset.GetPath().AppendChild("TemporalFieldArrayClass")))
+        cls.CreateFieldAssociationAttr().Set(cae.Tokens.vertex)
+        attr = cls.CreateFileNamesAttr()
+        for idx, config in enumerate(configs):
+            attr.Set(
+                [clientutils.make_file_url_if_possible(config["path"])], Usd.TimeCode(idx)
+            )  # FIXME: use index or time or shift or scale?
+
+        # now add each field array.
+        for field_name in ["position", "ids", "scale", "orientation", "velocity"]:
+            field_array = cae.Hdf5FieldArray.Define(
+                stage, dataset.GetPath().AppendChild(Tf.MakeValidIdentifier(field_name))
+            )
+            dataset.GetPrim().CreateRelationship(f"field:{field_name}").SetTargets({field_array.GetPath()})
+            field_array.GetPrim().GetSpecializes().SetSpecializes([cls.GetPath()])
+            for idx, config in enumerate(configs):
+                field_array.CreateHdf5PathAttr().Set(
+                    f"{config['h5_path_prefix']}/ParticleTypes/{p_type['node_name']}/{field_name}", Usd.TimeCode(idx)
+                )  # FIXME
+            if field_name == "position":
+                cae.PointCloudAPI(dataset).CreateCoordinatesRel().SetTargets({field_array.GetPath()})
+
+
+async def read_particle_types(uri: str, stage: Usd.Stage, rootPath: Sdf.Path) -> list[str]:
+    # read the first timestep to particle shapes.
+    # dirname is simply the file name without extension
+    p_types = []
+    p_uri = Path(uri)
+    h0_uri = str(p_uri.parent / f"{p_uri.stem}_data" / "0.h5")
+    with progress.ProgressContext(f"Loading timestep 0"):
+        _, h0_path = await get_local_file_async(h0_uri)
+
+    with h5.File(h0_path, "r") as h0:
+        if "/CreatorData/0/ParticleTypes" in h0:
+            scope = UsdGeom.Scope.Define(stage, rootPath.AppendChild("ParticleTypes"))
+            # hide scope from view, so prototypes are not shown in viewport
+            scope.CreateVisibilityAttr().Set(UsdGeom.Tokens.invisible)
+            scope_path = scope.GetPath()
+
+            for node_name, node in h0["/CreatorData/0/ParticleTypes"].items():
+                if not isinstance(node, h5.Group):
+                    continue
+
+                name = node.attrs.get("name", "Unknown")
+                p_types.append({"node_name": node_name, "name": name})
+                if spheres_node := node.get("spheres"):
+                    assert isinstance(spheres_node, h5.Dataset), "spheres should be a dataset"
+
+                    xform = UsdGeom.Xform.Define(stage, scope_path.AppendChild(Tf.MakeValidIdentifier(name)))
+                    dset = spheres_node[:]
+                    pos = dset["pos"]
+                    physicalRadius = dset["physicalRadius"]
+                    contactRadius = dset["contactRadius"]
+                    names = [x.decode("utf-8") for x in dset["name"]]
+                    for idx, name in enumerate(names):
+                        sphere = UsdGeom.Sphere.Define(stage, xform.GetPath().AppendChild(Tf.MakeValidIdentifier(name)))
+                        sphere.CreateRadiusAttr(physicalRadius[idx])
+                        sphere.AddTranslateOp().Set((pos[idx][0], pos[idx][1], pos[idx][2]))
+
+                        # just some metadata
+                        sphere.GetPrim().CreateAttribute(
+                            "edem:physicalRadius", Sdf.ValueTypeNames.Float, custom=True
+                        ).Set(physicalRadius[idx])
+                        sphere.GetPrim().CreateAttribute("edem:name", Sdf.ValueTypeNames.String, custom=True).Set(name)
+                        sphere.GetPrim().CreateAttribute("edem:position", Sdf.ValueTypeNames.Float3, custom=True).Set(
+                            (pos[idx][0], pos[idx][1], pos[idx][2])
+                        )
+                        sphere.GetPrim().CreateAttribute(
+                            "edem:contactRadius", Sdf.ValueTypeNames.Float, custom=True
+                        ).Set(contactRadius[idx])
+                elif "triangle nodes" in node and "coords" in node:
+                    # polyhedral particles
+                    tri_node = node["triangle nodes"]
+                    coords_node = node["coords"]
+
+                    mesh = UsdGeom.Mesh.Define(stage, scope_path.AppendChild(Tf.MakeValidIdentifier(name)))
+                    mesh.CreatePointsAttr().Set(Vt.Vec3fArray.FromNumpy(coords_node[:].reshape(-1, 3)))
+                    mesh.CreateFaceVertexIndicesAttr().Set(Vt.IntArray.FromNumpy(tri_node[:].ravel()))
+                    mesh.CreateFaceVertexCountsAttr().Set(Vt.IntArray(len(tri_node) * [3]))
+
+                    # just some metadata
+                    mesh.GetPrim().CreateAttribute("edem:name", Sdf.ValueTypeNames.String, custom=True).Set(name)
+                    mesh.GetPrim().CreateAttribute("edem:rawMass", Sdf.ValueTypeNames.Float, custom=True).Set(
+                        node.attrs.get("raw mass", 0.0)
+                    )
+                    mesh.GetPrim().CreateAttribute("edem:rawVolume", Sdf.ValueTypeNames.Float, custom=True).Set(
+                        node.attrs.get("raw volume", 0.0)
+                    )
+                    mesh.GetPrim().CreateAttribute("edem:rawSurfaceArea", Sdf.ValueTypeNames.Float, custom=True).Set(
+                        node.attrs.get("raw surface area", 0.0)
+                    )
+                    mesh.GetPrim().CreateAttribute("edem:sphericity", Sdf.ValueTypeNames.Float, custom=True).Set(
+                        node.attrs.get("sphericity", 0.0)
+                    )
+    return p_types

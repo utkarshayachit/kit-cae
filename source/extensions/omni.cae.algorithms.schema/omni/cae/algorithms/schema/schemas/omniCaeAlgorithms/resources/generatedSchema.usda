@@ -126,30 +126,60 @@ class "CaeAlgorithmsStreamlinesAPI" (
     )
 }
 
-class "CaeAlgorithmsGlyphsAPI" (
+class "CaeAlgorithmsGlyphsBaseAPI" (
     doc = "Applies to a PointInstancer prim to glyphs for a dataset."
 )
 {
     rel omni:cae:algorithms:glyphs:colors (
+        displayGroup = "Glyphs"
         displayName = "Colors"
         doc = "Specifies the field to use for coloring."
     )
     rel omni:cae:algorithms:glyphs:dataset (
+        displayGroup = "Glyphs"
         displayName = "Dataset"
         doc = "Specifies the CaeDataSet prim"
     )
     uniform int omni:cae:algorithms:glyphs:maxCount = 100000 (
+        displayGroup = "Glyphs"
         displayName = "Max Count"
-        doc = "Specifies the maximum number of glyphs to render."
+        doc = "Specifies the maximum number of glyphs to render. Use 0 to indicate all glyphs."
     )
     rel omni:cae:algorithms:glyphs:orientation (
+        displayGroup = "Glyphs"
         displayName = "Orientation"
-        doc = "Specifies the vector field to use as orientations"
+        doc = "Specifies the vector field to use as orientations. These can be direction vectors or quaternions based on 'orientationType'."
     )
+    uniform token omni:cae:algorithms:glyphs:orientationType = "direction" (
+        allowedTokens = ["direction", "quaternion"]
+        displayGroup = "Glyphs"
+        displayName = "Orientation Type"
+        doc = "Specifies the type of data in the 'orientation' field. 'direction' indicates 3D direction vectors. 'quaternion' indicates (x,y,z,w) quaternions."
+    )
+    rel omni:cae:algorithms:glyphs:scale (
+        displayGroup = "Glyphs"
+        displayName = "Scale"
+        doc = "Specifies the field to use for scaling."
+    )
+}
+
+class "CaeAlgorithmsGlyphsAPI" (
+    apiSchemas = ["CaeAlgorithmsGlyphsBaseAPI"]
+    doc = "Applies to a PointInstancer prim to glyphs for a dataset."
+)
+{
     uniform token omni:cae:algorithms:glyphs:shape = "arrow" (
         allowedTokens = ["arrow", "cone", "sphere"]
+        displayGroup = "Glyphs"
         displayName = "Shape"
         doc = "Specifies the glyph shape to use."
     )
+}
+
+class "CaeAlgorithmsCustomGlyphsAPI" (
+    apiSchemas = ["CaeAlgorithmsGlyphsBaseAPI"]
+    doc = "Applies to a PointInstancer prim to glyphs for a dataset."
+)
+{
 }
 

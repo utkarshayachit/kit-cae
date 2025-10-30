@@ -251,11 +251,11 @@ class "CaeAlgorithmsStreamlinesAPI" (
 }
 
 
-class "CaeAlgorithmsGlyphsAPI" (
+class "CaeAlgorithmsGlyphsBaseAPI" (
     inherits = </APISchemaBase>
     customData = {
         token apiSchemaType = "singleApply"
-        string className = "GlyphsAPI"
+        string className = "GlyphsBaseAPI"
     }
     doc = """Applies to a PointInstancer prim to glyphs for a dataset."""
 )
@@ -263,41 +263,88 @@ class "CaeAlgorithmsGlyphsAPI" (
     rel omni:cae:algorithms:glyphs:dataset (
         doc = "Specifies the CaeDataSet prim"
         displayName = "Dataset"
+        displayGroup = "Glyphs"
         customData = {
             string apiName = "dataset"
         }
     )
 
     rel omni:cae:algorithms:glyphs:orientation (
-        doc = "Specifies the vector field to use as orientations"
+        doc = "Specifies the vector field to use as orientations. These can be direction vectors or quaternions based on 'orientationType'."
         displayName = "Orientation"
+        displayGroup = "Glyphs"
         customData = {
             string apiName = "orientation"
+        }
+    )
+
+    uniform token omni:cae:algorithms:glyphs:orientationType = "direction" (
+        doc = "Specifies the type of data in the 'orientation' field. 'direction' indicates 3D direction vectors. 'quaternion' indicates (x,y,z,w) quaternions."
+        allowedTokens = ["direction", "quaternion"]
+        displayName = "Orientation Type"
+        displayGroup = "Glyphs"
+        customData = {
+            string apiName = "orientationType"
         }
     )
 
     rel omni:cae:algorithms:glyphs:colors (
         doc = "Specifies the field to use for coloring."
         displayName = "Colors"
+        displayGroup = "Glyphs"
         customData = {
             string apiName = "colors"
         }
     )
 
-    uniform token omni:cae:algorithms:glyphs:shape = "arrow" (
-        doc = "Specifies the glyph shape to use."
-        allowedTokens = ["arrow", "cone", "sphere"]
-        displayName = "Shape"
-        customData = {
-            string apiName = "shape"
-        }
-    )
-
     uniform int omni:cae:algorithms:glyphs:maxCount = 100000 (
-        doc = "Specifies the maximum number of glyphs to render."
+        doc = "Specifies the maximum number of glyphs to render. Use 0 to indicate all glyphs."
         displayName ="Max Count"
+        displayGroup = "Glyphs"
         customData = {
             string apiName = "maxCount"
         }
     )
+
+    rel omni:cae:algorithms:glyphs:scale (
+        doc = "Specifies the field to use for scaling."
+        displayName = "Scale"
+        displayGroup = "Glyphs"
+        customData = {
+            string apiName = "scale"
+        }
+    )
+}
+
+class "CaeAlgorithmsGlyphsAPI" (
+    inherits = </APISchemaBase>
+    customData = {
+        token apiSchemaType = "singleApply"
+        string className = "GlyphsAPI"
+    }
+    doc = """Applies to a PointInstancer prim to glyphs for a dataset."""
+    prepend apiSchemas = ["CaeAlgorithmsGlyphsBaseAPI"]
+)
+{
+    uniform token omni:cae:algorithms:glyphs:shape = "arrow" (
+        doc = "Specifies the glyph shape to use."
+        allowedTokens = ["arrow", "cone", "sphere"]
+        displayName = "Shape"
+        displayGroup = "Glyphs"
+        customData = {
+            string apiName = "shape"
+        }
+    )
+}
+
+class "CaeAlgorithmsCustomGlyphsAPI" (
+    inherits = </APISchemaBase>
+    customData = {
+        token apiSchemaType = "singleApply"
+        string className = "CustomGlyphsAPI"
+    }
+    doc = """Applies to a PointInstancer prim to glyphs for a dataset."""
+    prepend apiSchemas = ["CaeAlgorithmsGlyphsBaseAPI"]
+)
+{
 }

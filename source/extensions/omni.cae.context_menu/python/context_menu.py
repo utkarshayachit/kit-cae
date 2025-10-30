@@ -11,6 +11,7 @@
 __all__ = ["get_algorithms_menu_dict", "get_flow_menu_dict"]
 
 
+import inspect
 from functools import partial
 from logging import getLogger
 from pathlib import Path
@@ -19,6 +20,7 @@ from typing import Callable, Union
 import numpy as np
 import omni.kit.commands
 from omni.cae.schema import cae
+from omni.kit.async_engine import run_coroutine
 from omni.usd import get_stage_next_free_path
 from pxr import Sdf, Usd, UsdGeom, UsdVol, Vt
 
@@ -197,6 +199,17 @@ def create_unit_box(objects: dict):
 
 
 def create_with_single(schema: Usd.Typed, command: str, name: str, objects: dict):
+    run_coroutine(create_with_single_async(schema, command, name, objects))
+
+
+async def command_execute(command: str, **kwargs):
+    status, result = omni.kit.commands.execute(command, **kwargs)
+    if not status:
+        return status, result
+    return (status, await result if inspect.isawaitable(result) else result)
+
+
+async def create_with_single_async(schema: Usd.Typed, command: str, name: str, objects: dict):
     stage: Usd.Stage = objects.get("stage")
     dataset_prims = get_active_prims(objects, lambda prim: prim.IsA(schema))
     if not dataset_prims:
@@ -207,9 +220,7 @@ def create_with_single(schema: Usd.Typed, command: str, name: str, objects: dict
         for dataset_prim in dataset_prims:
             cname = f"{name}_{dataset_prim.GetName()}"
             prim_path = get_stage_next_free_path(stage, get_anchor_path(stage).AppendChild(cname), False)
-            status = omni.kit.commands.execute(
-                command, dataset_path=str(dataset_prim.GetPath()), prim_path=str(prim_path)
-            )
+            status = await command_execute(command, dataset_path=str(dataset_prim.GetPath()), prim_path=str(prim_path))
             if status is not None and status[0]:
                 paths_to_select.append(str(prim_path))
                 logger.info("Created %s", status)
@@ -295,6 +306,13 @@ def get_algorithms_menu_dict():
                 {
                     "name": "Glyphs",
                     "onclick_fn": partial(create_with_single, cae.DataSet, "CreateCaeAlgorithmsGlyphs", "Glyphs"),
+                    "show_fn": partial(schema_isa, cae.DataSet),
+                },
+                {
+                    "name": "Glyphs (Custom Shape)",
+                    "onclick_fn": partial(
+                        create_with_single, cae.DataSet, "CreateCaeAlgorithmsCustomGlyphs", "CustomGlyphs"
+                    ),
                     "show_fn": partial(schema_isa, cae.DataSet),
                 },
                 {

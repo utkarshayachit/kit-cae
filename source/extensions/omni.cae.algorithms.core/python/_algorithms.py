@@ -198,17 +198,31 @@ class Glyphs(Algorithm):
 
     async def execute_impl(self, timeCode: Usd.TimeCode) -> bool:
         dataset_prim = usd_utils.get_target_prim(self.prim, f"{self.ns}:dataset")
-        shape = usd_utils.get_attribute(self.prim, f"{self.ns}:shape")
         max_count = usd_utils.get_attribute(self.prim, f"{self.ns}:maxCount")
+
+        # since we use this Algorithm for CaeAlgorithmsCustomGlyphsAPI too, we need to
+        # handle missing shape attribute.
+        shape = usd_utils.get_attribute(self.prim, f"{self.ns}:shape", quiet=True) or "arrow"
 
         orientation_fields = usd_utils.get_target_field_names(
             self.prim, f"{self.ns}:orientation", dataset_prim, quiet=True
         )
-        color_fields = usd_utils.get_target_field_names(self.prim, f"{self.ns}:colors", dataset_prim, quiet=True)
+        orientations_type = usd_utils.get_attribute(self.prim, f"{self.ns}:orientationType", quiet=True) or "direction"
+        if orientations_type not in ("direction", "quaternion"):
+            logger.warning(
+                "Invalid orientationType '%s' on %s. Should be 'direction' or 'quaternion'. Assuming 'direction'",
+                orientations_type,
+                self.prim.GetPath(),
+            )
+            orientations_type = "direction"
 
-        fields = set(color_fields + orientation_fields)
+        color_fields = usd_utils.get_target_field_names(self.prim, f"{self.ns}:colors", dataset_prim, quiet=True)
+        scale_fields = usd_utils.get_target_field_names(self.prim, f"{self.ns}:scale", dataset_prim, quiet=True)
+
+        fields = set(color_fields + orientation_fields + scale_fields)
         result = await ConvertToPointCloud.invoke(dataset_prim, list(fields), timeCode)
         points: np.ndarray = array_utils.as_numpy_array(result.points).astype(np.float32, copy=False)
+        nb_original_points = points.shape[0]
 
         if max_count > 0 and len(points) > max_count:
             # set a stride to limit the number of points
@@ -217,29 +231,44 @@ class Glyphs(Algorithm):
             stride = 1
 
         points = points[::stride] if stride > 1 else points
-        protoIndices = np.empty(points.shape[0], dtype=np.int32)
+        protoIndices = np.empty(points.shape[0], dtype=np.intc)
         if shape == "arrow":
             protoIndices.fill(0)
         elif shape == "cone":
             protoIndices.fill(1)
         elif shape == "sphere":
             protoIndices.fill(2)
+        else:
+            raise usd_utils.QuietableException(f"Invalid shape '{shape}' specified on {self.prim}")
 
         if orientation_fields and all(field in result.fields for field in orientation_fields):
             orientations = array_utils.column_stack([result.fields[f] for f in orientation_fields])
             if orientations.ndim != 2:
                 logger.error("Invalid orientation fields shape %s", orientations.shape)
                 orientations = None
-            elif orientations.shape[0] != points.shape[0]:
-                logger.error("Invalid orientation fields shape %s (pts=%s)", orientations.shape, points.shape[0])
+            elif orientations.shape[0] != nb_original_points:
+                logger.error("Invalid orientation fields shape %s (pts=%s)", orientations.shape, nb_original_points)
                 orientations = None
-            elif orientations.shape[1] != 3:
-                logger.error("Invalid orientation fields shape %s (should have 3 components)", orientations.shape)
+            elif orientations_type == "direction" and orientations.shape[1] != 3:
+                logger.error(
+                    "Invalid orientation fields shape %s (should have 3 components) when orientationType is 'direction'",
+                    orientations.shape,
+                )
+                orientations = None
+            elif orientations_type == "quaternion" and orientations.shape[1] != 4:
+                logger.error(
+                    "Invalid orientation fields shape %s (should have 4 components) when orientationType is 'quaternion'",
+                    orientations.shape,
+                )
                 orientations = None
             else:
                 orientations = array_utils.as_numpy_array(orientations).astype(np.float32, copy=False)
                 orientations = orientations[::stride] if stride > 1 else orientations
-            quaternions = array_utils.compute_quaternions_from_directions(orientations)
+            if orientations_type == "direction" and orientations is not None:
+                # convert to quaternions
+                quaternions = array_utils.compute_quaternions_from_directions(orientations)
+            else:
+                quaternions = orientations
         else:
             orientations = None
             quaternions = None
@@ -253,12 +282,22 @@ class Glyphs(Algorithm):
         else:
             scalars = None
 
+        if scale_fields and all(field in result.fields for field in scale_fields):
+            scales: np.ndarray = array_utils.as_numpy_array(
+                array_utils.get_scalar_array([result.fields[f] for f in scale_fields])
+            )
+            scales = scales[::stride] if stride > 1 else scales
+            assert scales.shape[0] == points.shape[0]
+        else:
+            scales = None
+
         primT = UsdGeomRt.PointInstancer(self.prim_rt)
         primvarsApi = UsdGeomRt.PrimvarsAPI(primT.GetPrim())
 
         primT.GetPositionsAttr().Set(VtRt.Vec3fArray(points))
-        primT.GetProtoIndicesAttr().Set(VtRt.IntArray(protoIndices.reshape(-1, 1).astype(np.intc)))
         primT.GetOrientationsAttr().Set(VtRt.QuathArray(quaternions) if quaternions is not None else [])
+        primT.GetScalesAttr().Set(VtRt.FloatArray(scales.reshape(-1, 1)) if scales is not None else [])
+        primT.GetProtoIndicesAttr().Set(VtRt.IntArray(protoIndices.reshape(-1, 1)))
 
         # have to create primvar here, creating in PXR and using here doesn't work.
         scalar_pvar = primvarsApi.CreatePrimvar("scalar", SdfRt.ValueTypeNames.FloatArray, UsdGeomRt.Tokens.vertex)

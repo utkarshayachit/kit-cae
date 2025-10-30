@@ -2,6 +2,11 @@
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.4.0]
+
+* Added support for importing a subset of EDEM files.
+* Added support for custom glyphs that can use custom shapes as glyphs.
+
 ## [1.3.3]
 
 * Fixed API error in NanoVDBHelper.

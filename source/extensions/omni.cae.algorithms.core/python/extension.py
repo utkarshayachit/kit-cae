@@ -32,6 +32,7 @@ class Extension(IExt):
         factory.register_create_callback("BasisCurves", ["CaeAlgorithmsStreamlinesAPI"], Streamlines, self._extId)
         factory.register_create_callback("Points", ["CaeAlgorithmsPointsAPI"], Points, self._extId)
         factory.register_create_callback("PointInstancer", ["CaeAlgorithmsGlyphsAPI"], Glyphs, self._extId)
+        factory.register_create_callback("PointInstancer", ["CaeAlgorithmsCustomGlyphsAPI"], Glyphs, self._extId)
         factory.register_create_callback("Mesh", ["CaeAlgorithmsExternalFacesAPI"], ExternalFaces, self._extId)
 
         # register commands

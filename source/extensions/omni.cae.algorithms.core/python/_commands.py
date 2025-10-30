@@ -8,11 +8,13 @@
 # without an express license agreement from NVIDIA CORPORATION or
 #  its affiliates is strictly prohibited.
 
+import asyncio
 from logging import getLogger
 
 import omni.kit.commands
 from omni.cae.material_library import get_cae_materials
-from omni.usd import get_context
+from omni.kit.async_engine import run_coroutine
+from omni.usd import duplicate_prim, get_context
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
 
 logger = getLogger(__name__)
@@ -134,11 +136,13 @@ class CreateCaeAlgorithmsExtractPoints(omni.kit.commands.Command):
 
 
 class CreateCaeAlgorithmsGlyphs(omni.kit.commands.Command):
+    ns = "omni:cae:algorithms:glyphs"
+
     def __init__(self, dataset_path: str, prim_path: str):
         self._dataset_path = dataset_path
         self._prim_path = prim_path
 
-    def do(self):
+    async def do(self):
         logger.info("executing  CreateCaeAlgorithmsGlyphs.do()")
         stage: Usd.Stage = get_context().get_stage()
         dataset_prim = stage.GetPrimAtPath(self._dataset_path)
@@ -147,19 +151,19 @@ class CreateCaeAlgorithmsGlyphs(omni.kit.commands.Command):
 
         primT = UsdGeom.PointInstancer.Define(stage, self._prim_path)
         prim = primT.GetPrim()
-        prim.AddAppliedSchema("CaeAlgorithmsGlyphsAPI")
-        ns = "omni:cae:algorithms:glyphs"
-        prim.CreateRelationship(f"{ns}:dataset", custom=False).SetTargets({dataset_prim.GetPath()})
-        prim.CreateRelationship(f"{ns}:orientation", custom=False).SetTargets({})
-        prim.CreateRelationship(f"{ns}:colors", custom=False).SetTargets({})
-        prim.CreateAttribute(f"{ns}:shape", Sdf.ValueTypeNames.Token, custom=False).Set("arrow")
-        prim.CreateAttribute(f"{ns}:maxCount", Sdf.ValueTypeNames.Int, custom=False).Set(100000)
+        self.init_prim(prim)
+        prim.CreateRelationship(f"{self.ns}:dataset", custom=False).SetTargets({dataset_prim.GetPath()})
+        prim.CreateRelationship(f"{self.ns}:orientation", custom=False).SetTargets({})
+        prim.CreateRelationship(f"{self.ns}:colors", custom=False).SetTargets({})
+        prim.CreateRelationship(f"{self.ns}:scale", custom=False).SetTargets({})
+        prim.CreateAttribute(f"{self.ns}:maxCount", Sdf.ValueTypeNames.Int, custom=False).Set(100000)
 
         # These attributes need to be created initially otherwise the renderer entirely skips the Prim even if we add
         # these properties later on in the Algorithm.
         primT.CreatePositionsAttr()
         primT.CreateProtoIndicesAttr([0])
         primT.CreateOrientationsAttr([])
+        primT.CreateScalesAttr([])
 
         # api = UsdGeom.PrimvarsAPI(prim)
         # api.CreatePrimvar("scalar", Sdf.ValueTypeNames.FloatArray, UsdGeom.Tokens.vertex)
@@ -169,7 +173,23 @@ class CreateCaeAlgorithmsGlyphs(omni.kit.commands.Command):
         protosPrim = stage.OverridePrim(prim.GetPath().AppendChild("Protos"))
         # protosPrim = stage.DefinePrim(prim.GetPath().AppendChild("Protos"))
 
-        arrowXform = UsdGeom.Xform.Define(stage, protosPrim.GetPath().AppendChild("ArrowXform"))
+        prototypes = self.create_prototypes(stage, protosPrim.GetPath())
+        primT.CreatePrototypesRel().SetTargets(prototypes)
+
+        # create materials(s) for the glyphs
+        material = create_material(
+            "ScalarColor", stage, primT.GetPath().AppendChild("Materials").AppendChild("ScalarColor")
+        )
+        bind_material(primT, material)
+
+        logger.info("created '%s' with %d prototypes", str(prim.GetPath()), len(prototypes))
+
+    def init_prim(self, prim: Usd.Prim):
+        prim.AddAppliedSchema("CaeAlgorithmsGlyphsAPI")
+        prim.CreateAttribute(f"{self.ns}:shape", Sdf.ValueTypeNames.Token, custom=False).Set("arrow")
+
+    def create_prototypes(self, stage: Usd.Stage, parent_path: Sdf.Path) -> list[Sdf.Path]:
+        arrowXform = UsdGeom.Xform.Define(stage, parent_path.AppendChild("ArrowXform"))
         arrowCylinder = UsdGeom.Cylinder.Define(stage, arrowXform.GetPath().AppendChild("Cylinder"))
         arrowCylinder.CreateHeightAttr().Set(0.5)
         arrowCylinder.CreateRadiusAttr().Set(0.15)
@@ -181,7 +201,7 @@ class CreateCaeAlgorithmsGlyphs(omni.kit.commands.Command):
         arrowCone.CreateAxisAttr().Set(UsdGeom.Tokens.x)
         arrowCone.AddTranslateOp().Set((0.75, 0, 0))
 
-        coneXform = UsdGeom.Xform.Define(stage, protosPrim.GetPath().AppendChild("ConeXform"))
+        coneXform = UsdGeom.Xform.Define(stage, parent_path.AppendChild("ConeXform"))
         cone = UsdGeom.Cone.Define(stage, coneXform.GetPath().AppendChild("Cone"))
         cone.CreateHeightAttr().Set(1.0)
         cone.CreateRadiusAttr().Set(0.5)
@@ -191,19 +211,56 @@ class CreateCaeAlgorithmsGlyphs(omni.kit.commands.Command):
         xformAPI = UsdGeom.XformCommonAPI(cone.GetPrim())
         xformAPI.SetTranslate([0.5, 0, 0])
 
-        sphereXform = UsdGeom.Xform.Define(stage, protosPrim.GetPath().AppendChild("SphereXform"))
+        sphereXform = UsdGeom.Xform.Define(stage, parent_path.AppendChild("SphereXform"))
         sphere = UsdGeom.Sphere.Define(stage, sphereXform.GetPath().AppendChild("Sphere"))
         sphere.CreateRadiusAttr().Set(0.5)
 
-        primT.CreatePrototypesRel().SetTargets([arrowXform.GetPath(), coneXform.GetPath(), sphereXform.GetPath()])
+        return [arrowXform.GetPath(), coneXform.GetPath(), sphereXform.GetPath()]
 
-        # create materials(s) for the glyphs
-        material = create_material(
-            "ScalarColor", stage, primT.GetPath().AppendChild("Materials").AppendChild("ScalarColor")
+
+class CreateCaeAlgorithmsCustomGlyphs(CreateCaeAlgorithmsGlyphs):
+    def __init__(self, dataset_path: str, prim_path: str):
+        super().__init__(dataset_path, prim_path)
+        self._prototype_path = None
+
+    async def do(self):
+        self._prototype_path = await self.get_prototype_path()
+        return await super().do()
+
+    def init_prim(self, prim: Usd.Prim):
+        prim.AddAppliedSchema("CaeAlgorithmsCustomGlyphsAPI")
+
+    def create_prototypes(self, stage, parent_path) -> list[Sdf.Path]:
+        proto_prim = stage.GetPrimAtPath(self._prototype_path)
+        if not proto_prim:
+            raise RuntimeError(f"Prototype prim '{self._prototype_path}' is invalid!")
+
+        clone_path = parent_path.AppendChild(proto_prim.GetName())
+        duplicate_prim(stage, proto_prim.GetPath(), clone_path)
+        logger.warning("cloned prototype to: %s", clone_path)
+        return [clone_path]
+
+    async def get_prototype_path(self) -> str:
+        from omni.kit.property.usd import RelationshipTargetPicker
+
+        stage: Usd.Stage = get_context().get_stage()
+        picker = RelationshipTargetPicker(
+            stage,
+            [],
+            None,
+            {
+                "model_window": True,
+                "target_name": "Prototype",
+                "target_plural_name": "Prototypes",
+            },
         )
-        bind_material(primT, material)
 
-        logger.info("created '%s''", str(prim.GetPath()))
+        loop = asyncio.get_event_loop()
+        future = loop.create_future()
+        picker.show(1, lambda paths: future.set_result(paths[0] if paths else None))
+        path = await future
+        logger.warning("selected prototype: %s", path)
+        return path
 
 
 class CreateCaeAlgorithmsExtractExternalFaces(omni.kit.commands.Command):
