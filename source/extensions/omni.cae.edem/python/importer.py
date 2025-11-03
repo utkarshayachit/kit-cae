@@ -18,7 +18,7 @@ from omni.cae.data import progress
 from omni.cae.schema import cae
 from omni.client import get_local_file_async
 from omni.kit.tool.asset_importer import AbstractImporterDelegate
-from pxr import Sdf, Tf, Usd, UsdGeom, UsdUtils, Vt
+from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdUtils, Vt
 
 logger = getLogger(__name__)
 
@@ -96,6 +96,9 @@ async def populate_stage(uri: str, local_path: str, stage: Usd.Stage):
             logger.warning(f"No timesteps found in {uri}")
             return
 
+        # read geometry groups
+        geometry_groups = await read_geometry_groups(uri, stage, rootPath)
+
         # read particle types; only reads from the 1st timestep.
         particle_types = await read_particle_types(uri, stage, rootPath)
 
@@ -107,18 +110,27 @@ async def populate_stage(uri: str, local_path: str, stage: Usd.Stage):
             with progress.ProgressContext(f"Loading timestep {t}"):
                 _, h_path = await get_local_file_async(h_uri)
 
-            with h5.File(h_path, "r") as h:
-                if "TimestepData" not in h:
-                    continue
-                for _, node in h["TimestepData"].items():
-                    data_time = node.attrs.get("time", 0.0)
-                    configs.append(
-                        {
-                            "time": data_time,
-                            "path": h_uri,
-                            "h5_path_prefix": node.name,
-                        }
-                    )
+                with h5.File(h_path, "r") as h:
+                    if "TimestepData" not in h:
+                        continue
+                    for _, node in h["TimestepData"].items():
+                        data_time = node.attrs.get("time", 0.0)
+                        configs.append(
+                            {
+                                "time": data_time,
+                                "path": h_uri,
+                                "h5_path_prefix": node.name,
+                            }
+                        )
+
+                        # read xform for geometry groups if available
+                        if geometry := node.get("GeometryGroups"):
+                            for group_name, (mesh, op) in geometry_groups.items():
+                                xform_path = f"{group_name}/Kinematics/0/global transform"
+                                if xform := geometry.get(xform_path):
+                                    assert isinstance(xform, h5.Dataset), "xform should be a dataset"
+                                    transform = xform[:].reshape(4, 4)
+                                    op.Set(Gf.Matrix4d(transform).GetTranspose(), Usd.TimeCode(len(configs) - 1))
 
         if len(configs) != nb_timesteps:
             logger.error(f"Expected {nb_timesteps} timesteps, but found {len(configs)} in {uri}!")
@@ -230,3 +242,39 @@ async def read_particle_types(uri: str, stage: Usd.Stage, rootPath: Sdf.Path) ->
                         node.attrs.get("sphericity", 0.0)
                     )
     return p_types
+
+
+async def read_geometry_groups(uri: str, stage: Usd.Stage, rootPath: Sdf.Path):
+    geometry_groups = {}
+    p_uri = Path(uri)
+    h_uri = str(p_uri.parent / f"{p_uri.stem}_data" / "0.h5")
+    with progress.ProgressContext(f"Loading geometry groups from timestep 0"):
+        _, h_path = await get_local_file_async(h_uri)
+
+    with h5.File(h_path, "r") as h:
+        if "/CreatorData/0/GeometryGroups" in h:
+            scope = UsdGeom.Scope.Define(stage, rootPath.AppendChild("GeometryGroups"))
+            # hide scope from view, so prototypes are not shown in viewport
+            scope.CreateVisibilityAttr().Set(UsdGeom.Tokens.invisible)
+            scope_path = scope.GetPath()
+
+            for group_name, group in h["/CreatorData/0/GeometryGroups"].items():
+                if not isinstance(group, h5.Group):
+                    continue
+
+                name = group.attrs.get("name", "Unknown")
+                if "coords" in group and "triangle nodes" in group:
+                    # For now, directly reading the mesh and populating USDGeomMesh during import itself.
+                    # Eventually, we might want to create cae.DataSet instead to lazy load the data.
+                    mesh = UsdGeom.Mesh.Define(stage, scope_path.AppendChild(Tf.MakeValidIdentifier(name)))
+                    coords_node = group["coords"]
+                    tri_node = group["triangle nodes"]
+                    mesh.CreatePointsAttr().Set(Vt.Vec3fArray.FromNumpy(coords_node[:].reshape(-1, 3)))
+                    mesh.CreateFaceVertexIndicesAttr().Set(Vt.IntArray.FromNumpy(tri_node[:].ravel()))
+                    mesh.CreateFaceVertexCountsAttr().Set(Vt.IntArray(len(tri_node) * [3]))
+
+                    # add xform op
+                    op = mesh.AddTransformOp()
+                    op.Set(Gf.Matrix4d().SetIdentity())
+                    geometry_groups[group_name] = (mesh, op)
+    return geometry_groups
