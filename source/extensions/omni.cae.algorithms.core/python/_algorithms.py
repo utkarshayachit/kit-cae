@@ -287,7 +287,9 @@ class Glyphs(Algorithm):
                 array_utils.get_scalar_array([result.fields[f] for f in scale_fields])
             )
             scales = scales[::stride] if stride > 1 else scales
-            assert scales.shape[0] == points.shape[0]
+            # convert scales to a 3-component array
+            scales = np.repeat(scales.reshape(-1, 1), 3, axis=1)
+            assert scales.shape[0] == points.shape[0] and scales.shape[1] == 3
         else:
             scales = None
 
@@ -296,7 +298,7 @@ class Glyphs(Algorithm):
 
         primT.GetPositionsAttr().Set(VtRt.Vec3fArray(points))
         primT.GetOrientationsAttr().Set(VtRt.QuathArray(quaternions) if quaternions is not None else [])
-        primT.GetScalesAttr().Set(VtRt.FloatArray(scales.reshape(-1, 1)) if scales is not None else [])
+        primT.GetScalesAttr().Set(VtRt.Vec3fArray(scales) if scales is not None else [])
         primT.GetProtoIndicesAttr().Set(VtRt.IntArray(protoIndices.reshape(-1, 1)))
 
         # have to create primvar here, creating in PXR and using here doesn't work.
